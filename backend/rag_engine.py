@@ -270,7 +270,12 @@ class ReportRAGEngine:
         self.co_client = None
         if cohere_api_key and cohere:
             try:
-                self.co_client = cohere.Client(cohere_api_key)
+                # Explicit timeout — without this, a slow/hanging Cohere
+                # call has no bound on our side at all (unlike Gemini/Groq,
+                # which already pass timeout= on every request), so it can
+                # run past gunicorn's worker timeout and crash the whole
+                # worker process instead of returning a clean error.
+                self.co_client = cohere.Client(cohere_api_key, timeout=45)
             except Exception as e:
                 log.warning("Could not initialize Cohere client: %s", e)
 
