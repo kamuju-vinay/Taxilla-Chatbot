@@ -1,0 +1,15 @@
+flask==3.0.3
+flask-cors==4.0.1
+apscheduler==3.10.4
+requests==2.32.3
+msal==1.29.0
+google-auth==2.34.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.144.0
+python-dotenv==1.0.1
+pdfplumber==0.11.4
+openpyxl==3.1.5
+numpy>=1.26.4
+cohere==5.11.0  # only needed if you use Cohere (either for retrieval or as AI_PROVIDER)
+supabase==2.31.0  # must be >=2.10 to support Supabase's new sb_secret_/sb_publishable_ key format
+
