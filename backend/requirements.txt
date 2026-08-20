@@ -1,5 +1,6 @@
 flask==3.0.3
 flask-cors==4.0.1
+gunicorn==23.0.0
 apscheduler==3.10.4
 requests==2.32.3
 msal==1.29.0
