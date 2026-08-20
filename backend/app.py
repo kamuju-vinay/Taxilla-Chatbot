@@ -158,35 +158,58 @@ def send_email():
     if not valid_recipients:
         valid_recipients = [sender_addr]
 
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = sender_addr
-        msg["To"] = ", ".join(valid_recipients)
-        msg.attach(MIMEText(html_content, "html"))
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender_addr
+    msg["To"] = ", ".join(valid_recipients)
+    msg.attach(MIMEText(html_content, "html"))
 
-        smtp_server = os.environ.get("GMAIL_SMTP_SERVER", "smtp.gmail.com")
-        smtp_port = int(os.environ.get("GMAIL_SMTP_PORT", 587))
+    smtp_server = os.environ.get("GMAIL_SMTP_SERVER", "smtp.gmail.com")
+    # Try STARTTLS on 587 first, then fall back to implicit SSL on 465.
+    # Some hosting providers (Render included, depending on plan/region)
+    # block or silently drop one of the two outbound SMTP ports — trying
+    # both here means a send only fails if BOTH are actually blocked,
+    # instead of failing outright the moment the first one is.
+    attempts = [
+        (int(os.environ.get("GMAIL_SMTP_PORT", 587)), "starttls"),
+        (465, "ssl"),
+    ]
+    last_error = None
+    for port, mode in attempts:
+        try:
+            if mode == "starttls":
+                with smtplib.SMTP(smtp_server, port, timeout=15) as server:
+                    server.starttls()
+                    server.login(sender_addr, app_pwd)
+                    server.sendmail(sender_addr, valid_recipients, msg.as_string())
+            else:
+                import ssl
+                context = ssl.create_default_context()
+                with smtplib.SMTP_SSL(smtp_server, port, timeout=15, context=context) as server:
+                    server.login(sender_addr, app_pwd)
+                    server.sendmail(sender_addr, valid_recipients, msg.as_string())
+            return jsonify({"ok": True, "message": f"Successfully sent enhanced report email to {len(valid_recipients)} recipient(s) ({', '.join(valid_recipients)})!"})
+        except smtplib.SMTPRecipientsRefused as e:
+            log.exception("SMTP recipient refused")
+            return jsonify({"ok": False, "error": f"Recipient Rejected: The email recipient address was refused by Gmail ({e}). Please enter a valid recipient email address."}), 400
+        except smtplib.SMTPAuthenticationError as e:
+            log.exception("SMTP authentication failed")
+            return jsonify({"ok": False, "error": "Gmail rejected the App Password. Please regenerate it in your Google Account (Security > App Passwords) and update Settings."}), 400
+        except Exception as e:
+            log.warning("SMTP send via port %s (%s) failed, trying next option: %s", port, mode, e)
+            last_error = e
+            continue
 
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=12) as server:
-            server.starttls()
-            server.login(sender_addr, app_pwd)
-            server.sendmail(sender_addr, valid_recipients, msg.as_string())
-
-        return jsonify({"ok": True, "message": f"Successfully sent enhanced report email to {len(valid_recipients)} recipient(s) ({', '.join(valid_recipients)})!"})
-    except smtplib.SMTPRecipientsRefused as e:
-        log.exception("SMTP recipient refused")
-        return jsonify({"ok": False, "error": f"Recipient Rejected: The email recipient address was refused by Gmail ({e}). Please enter a valid recipient email address."}), 400
-    except Exception as e:
-        log.exception("Failed to send email via SMTP")
-        err_str = str(e)
-        if "11001" in err_str or "getaddrinfo failed" in err_str:
-            err_str = "DNS resolution error while connecting to smtp.gmail.com. Please check your internet connection or firewall/VPN settings."
-        return jsonify({"ok": False, "error": err_str}), 500
+    err_str = str(last_error)
+    if "11001" in err_str or "getaddrinfo failed" in err_str:
+        err_str = "DNS resolution error while connecting to smtp.gmail.com. Please check your internet connection or firewall/VPN settings."
+    elif "timed out" in err_str.lower() or "timeout" in err_str.lower():
+        err_str = "Both SMTP ports (587 and 465) timed out — outbound SMTP may be blocked on this host's network. Consider connecting Gmail via OAuth instead, which sends over HTTPS and isn't affected by SMTP port restrictions."
+    return jsonify({"ok": False, "error": err_str}), 500
 
 
 @app.post("/api/auth/gmail/reset")

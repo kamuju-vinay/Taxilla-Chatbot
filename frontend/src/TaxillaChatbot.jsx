@@ -402,10 +402,16 @@ function parseModelJson(text) {
     const parsed = JSON.parse(clean);
     const ansText = parsed.answer || parsed.text || (typeof parsed === "string" ? parsed : null);
 
-    // First priority: check if text response has multi-approach stacked figures (Location Based vs Market Based)
-    let chart = extractChartFromText(ansText);
-
-    if (!chart && parsed.chartData && Array.isArray(parsed.chartData) && parsed.chartData.length > 0) {
+    // The backend's own chartData is the trustworthy signal — it comes
+    // straight from the model's structured JSON response, grounded in the
+    // real report data. The text-scraping regex below is only a fallback
+    // for the rare case the backend didn't return chartData at all; using
+    // it as the FIRST priority (as before) meant a real, correct chart
+    // from the backend was routinely thrown away in favor of a fragile
+    // heuristic match against the prose, which is why good text answers
+    // were "losing" their graph.
+    let chart = null;
+    if (parsed.chartData && Array.isArray(parsed.chartData) && parsed.chartData.length > 0) {
       chart = {
         type: parsed.chartType || "bar",
         stacked: parsed.stacked || false,
@@ -413,6 +419,9 @@ function parseModelJson(text) {
         title: parsed.chartTitle || "Data Insights",
         data: parsed.chartData,
       };
+    }
+    if (!chart) {
+      chart = extractChartFromText(ansText);
     }
 
     return {
@@ -2388,6 +2397,60 @@ async function enhanceReportWithAI(file, instructions) {
   return { html: await convertFileToHtml(file), aiGenerated: false, error: null };
 }
 
+/* Combines plain-text extraction across ALL currently loaded report
+   files (not just the first one) into a single labeled block, so the
+   consolidated report reflects every xlsx/csv report currently in the
+   system rather than only whichever happened to be first. */
+async function extractCombinedReportPlainText(fileObjs) {
+  const parts = [];
+  for (const f of fileObjs) {
+    try {
+      let file = f._rawFile;
+      if (!file && f.downloadUrl) {
+        const res = await fetch(f.downloadUrl);
+        const blob = await res.blob();
+        file = new File([blob], f.name);
+      }
+      if (!file) continue;
+      const text = await extractReportPlainText(file);
+      if (text.trim()) {
+        parts.push(`===== REPORT: ${f.name} =====\n${text}`);
+      }
+    } catch {
+      /* skip files that fail to fetch/parse — still combine the rest */
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/* Same idea as enhanceReportWithAI, but for a consolidated multi-file
+   report — sends ALL loaded files' data in one call so the LLM can
+   cross-reference and reconcile across reports, matching the backend's
+   existing "compare/reconcile across reports" prompt rule. */
+async function enhanceCombinedReportWithAI(fileObjs, instructions) {
+  const reportText = await extractCombinedReportPlainText(fileObjs);
+  if (!reportText.trim()) {
+    return { html: null, aiGenerated: false, error: "No readable data found across the selected reports." };
+  }
+  const combinedInstructions =
+    (instructions || "") +
+    " This report consolidates multiple source files — cross-reference and reconcile figures across all of them, and present one unified executive report rather than separate per-file sections.";
+  try {
+    const res = await apiFetch("/api/enhance-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportText, instructions: combinedInstructions }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok && data.html) {
+      return { html: data.html, aiGenerated: true, error: null };
+    }
+    return { html: null, aiGenerated: false, error: data.message || "AI enhancement is unavailable right now." };
+  } catch {
+    return { html: null, aiGenerated: false, error: "Could not reach the AI service." };
+  }
+}
+
 async function convertFileToHtml(file) {
   const ext = fileExt(file.name);
   let htmlSections = [];
@@ -2985,6 +3048,34 @@ function EmailProcessorView({ onBack, aiSettings, setAiSettings, onOpenSettings,
     setFileError("");
   };
 
+  // Generates ONE consolidated report across every currently loaded
+  // file (mailbox-synced + uploaded) instead of only the first one —
+  // the previous flow silently ignored every file after files[0].
+  const handleGenerateCombinedReport = async () => {
+    if (!files || files.length < 2) return;
+    setFileError("");
+    setAiEnhancing(true);
+    setAiEnhanceNotice("");
+    try {
+      const { html, aiGenerated, error } = await enhanceCombinedReportWithAI(files, instructions);
+      setAiEnhancing(false);
+      if (!aiGenerated && error) {
+        setAiEnhanceNotice(error);
+        return;
+      }
+      if (html) {
+        setExcelFile(null);
+        setFileDeleted(false);
+        setHtmlContent(html);
+        const combinedSubject = `TAXILLA Consolidated Report (${files.length} reports)`;
+        setSubject(combinedSubject);
+      }
+    } catch {
+      setAiEnhancing(false);
+      setFileError("Couldn't generate the consolidated report. Please try again.");
+    }
+  };
+
   const removeTo = (email) => setToRecipients((prev) => prev.filter((e) => e !== email));
   const removeCc = (email) => setCcRecipients((prev) => prev.filter((e) => e !== email));
 
@@ -3068,7 +3159,7 @@ function EmailProcessorView({ onBack, aiSettings, setAiSettings, onOpenSettings,
               </div>
 
               {/* Upload File Input Button */}
-              <div>
+              <div className="flex items-center gap-2">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3076,6 +3167,16 @@ function EmailProcessorView({ onBack, aiSettings, setAiSettings, onOpenSettings,
                   onChange={handleExcelCsvUpload}
                   className="hidden"
                 />
+                {files && files.length >= 2 && (
+                  <button
+                    onClick={handleGenerateCombinedReport}
+                    disabled={aiEnhancing}
+                    title={`Generate one consolidated report from all ${files.length} loaded reports`}
+                    className="flex items-center gap-1.5 rounded-lg border border-indigo-600 bg-indigo-50 px-3 py-1.5 text-[12px] font-semibold text-indigo-800 hover:bg-indigo-100 transition-colors shadow-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <Layers size={14} /> Combine All ({files.length})
+                  </button>
+                )}
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   className="flex items-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-50 px-3 py-1.5 text-[12px] font-semibold text-emerald-800 hover:bg-emerald-100 transition-colors shadow-xs cursor-pointer"
@@ -3712,7 +3813,14 @@ export default function TaxillaChatbot() {
         setConnected((prev) => (prev !== ok ? ok : prev));
         if (ok) {
           apiListReports().then((list) => {
-            if (unmounted || !list.length) return;
+            if (unmounted) return;
+            // NOTE: previously this bailed out early when the backend
+            // returned an empty list ("!list.length"), which meant that
+            // deleting every report left the stale (deleted) files stuck
+            // in the UI forever — including across a full page refresh,
+            // since this same effect runs again on mount. An empty list
+            // is a perfectly valid, real state (nothing left after a
+            // delete) and must be reflected, not skipped.
             const mapped = list.map(entryToFile);
             setFiles((prev) => {
               // Don't clobber files the person is actively previewing/parsing —

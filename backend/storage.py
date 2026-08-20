@@ -80,6 +80,38 @@ def _cache_path(report_id, ext):
     return REPORTS_DIR / f"{report_id}{ext}"
 
 
+# Render's free/starter disk is only 512MB total (shared with the Python
+# runtime itself), and REPORTS_DIR is purely a disposable local cache —
+# Supabase Storage is the real source of truth (see module docstring).
+# Capping it and evicting the least-recently-used files keeps the app
+# from ever filling the disk, since files simply get re-downloaded from
+# Supabase on next access (_ensure_cached) if they're needed again.
+_MAX_CACHE_BYTES = 150 * 1024 * 1024  # 150MB — comfortably under 512MB total
+
+
+def _evict_cache_if_needed():
+    try:
+        entries = [p for p in REPORTS_DIR.glob("*") if p.is_file() and p.name not in ("index.json", "deleted_index.json")]
+        total = sum(p.stat().st_size for p in entries)
+        if total <= _MAX_CACHE_BYTES:
+            return
+        # Oldest-accessed first — st_atime is updated whenever a file is
+        # read (downloads, chat retrieval), so this is a real LRU, not
+        # just oldest-written.
+        entries.sort(key=lambda p: p.stat().st_atime)
+        for p in entries:
+            if total <= _MAX_CACHE_BYTES:
+                break
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                total -= size
+            except Exception:
+                continue
+    except Exception:
+        pass  # cache eviction is best-effort — never let it break a request
+
+
 def delete_reports(report_ids):
     sb = _sb()
     ids = list(set(report_ids))
@@ -198,6 +230,7 @@ def save_attachment(*, filename, content_bytes, source, provider_message_id,
     dest = _cache_path(report_id, ext)
     with open(dest, "wb") as f:
         f.write(content_bytes)
+    _evict_cache_if_needed()
 
     has_text = False
     extracted_text = None
@@ -227,6 +260,7 @@ def _ensure_cached(report_id, stored_as):
     data = _sb().storage.from_(SUPABASE_BUCKET).download(stored_as)
     with open(cache_file, "wb") as f:
         f.write(data)
+    _evict_cache_if_needed()
     return cache_file
 
 

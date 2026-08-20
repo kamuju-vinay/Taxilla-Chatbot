@@ -157,6 +157,47 @@ def _tokenize(text):
     return _TOKEN_RE.findall((text or "").lower())
 
 
+# Belt-and-suspenders safety net: the system prompt already instructs the
+# model never to mention file names, extensions, or mail-related origin
+# words, but LLMs occasionally slip (quoting a filename verbatim from the
+# context, or saying "the attached file"). This scrubs any that leak
+# through before the answer ever reaches the person, since the prompt
+# alone isn't a hard guarantee.
+_METADATA_LEAK_PATTERNS = [
+    re.compile(r"\b[\w\-. ]+?\.(xlsx|xls|csv|pdf)\b", re.IGNORECASE),
+    re.compile(r"\b(email|e-mail|mailbox|gmail|outlook|attachment|attached file|uploaded file)\b", re.IGNORECASE),
+]
+
+
+def _scrub_metadata_leakage(answer_text):
+    if not answer_text:
+        return answer_text
+    cleaned = answer_text
+    for pattern in _METADATA_LEAK_PATTERNS:
+        cleaned = pattern.sub("the report", cleaned)
+    return cleaned
+
+
+def _scrub_json_answer(raw_json_text):
+    """The model's raw response is expected to be a JSON string with an
+    "answer" field (see _SYSTEM_PROMPT_TMPL). Parses it, scrubs just that
+    field, and re-serializes — leaves the string untouched (rather than
+    raising) if it isn't valid JSON, since the caller/frontend already
+    has its own tolerant fallback parsing for that case."""
+    try:
+        text = raw_json_text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+        if isinstance(data, dict) and "answer" in data:
+            data["answer"] = _scrub_metadata_leakage(data["answer"])
+            return json.dumps(data)
+        return raw_json_text
+    except Exception:
+        return raw_json_text
+
+
 def _build_history_section(history):
     """history: list of {"question": str, "answer": str} pairs, oldest
     first. Returns a prompt section (or "" if no history), trimmed to the
@@ -407,7 +448,13 @@ class ReportRAGEngine:
         if not self.co_client:
             return None
         try:
-            response = self.co_client.chat(message=prompt, model=self.cohere_model)
+            # Low, fixed temperature — the earlier default (unset, so each
+            # provider's own default applied, typically ~0.7-1.0) meant the
+            # exact same question could get noticeably different answers
+            # from one ask to the next. This is a factual-reporting
+            # assistant, not a creative one, so consistency matters more
+            # than variety here.
+            response = self.co_client.chat(message=prompt, model=self.cohere_model, temperature=0.1)
             return (response.text or "").strip()
         except Exception as e:
             log.error("Cohere chat call failed: %s", e)
@@ -422,7 +469,7 @@ class ReportRAGEngine:
                 url,
                 params={"key": self.gemini_api_key},
                 headers={"content-type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.1}},
                 timeout=timeout,
             )
             resp.raise_for_status()
@@ -442,6 +489,7 @@ class ReportRAGEngine:
         payload = {
             "model": self.groq_model,
             "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -495,15 +543,15 @@ class ReportRAGEngine:
             if p == "cohere" and self.co_client:
                 result = self._generate_cohere(prompt)
                 if result:
-                    return result
+                    return _scrub_json_answer(result)
             elif p == "gemini" and self.gemini_api_key:
                 result = self._generate_gemini(prompt)
                 if result:
-                    return result
+                    return _scrub_json_answer(result)
             elif p == "groq" and self.groq_api_key:
                 result = self._generate_groq(prompt)
                 if result:
-                    return result
+                    return _scrub_json_answer(result)
         return None
 
     def generate_report_html(self, instructions: str, report_context: str, provider: str = None):
