@@ -45,7 +45,7 @@ except ImportError:
 
 log = logging.getLogger("rag_engine")
 
-COHERE_CHAT_MODEL_DEFAULT = "command-r-plus"
+COHERE_CHAT_MODEL_DEFAULT = "command-a-03-2025"
 GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_MODEL_DEFAULT = "openai/gpt-oss-120b"
@@ -462,7 +462,15 @@ class ReportRAGEngine:
             response = self.co_client.chat(message=prompt, model=self.cohere_model, temperature=0.1)
             return (response.text or "").strip()
         except Exception as e:
-            log.error("Cohere chat call failed: %s", e)
+            err_str = str(e)
+            if "was removed" in err_str or "404" in err_str:
+                log.error(
+                    "Cohere chat call failed — model '%s' appears to be retired/removed by "
+                    "Cohere. Update the Cohere model in Settings to a currently-supported one "
+                    "(e.g. command-a-03-2025). Raw error: %s", self.cohere_model, e,
+                )
+            else:
+                log.error("Cohere chat call failed: %s", e)
             return None
 
     def _generate_gemini(self, prompt: str, timeout: int = 45):
