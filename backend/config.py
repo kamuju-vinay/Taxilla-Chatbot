@@ -125,18 +125,56 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
+def _fetch_runtime_row():
+    """Read the single runtime_settings row from Supabase. Returns the
+    stored dict, or None if Supabase isn't configured/reachable (caller
+    should fall back to the local JSON file in that case)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    try:
+        from supabase import create_client
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        res = client.table("runtime_settings").select("data").eq("id", 1).execute()
+        if res.data:
+            return res.data[0]["data"]
+        return {}
+    except Exception:
+        return None
+
+
+def _save_runtime_row(data):
+    """Upsert the single runtime_settings row in Supabase. Returns True on
+    success so the caller knows whether it also needs the local-file
+    fallback."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        from supabase import create_client
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        client.table("runtime_settings").upsert({"id": 1, "data": data}).execute()
+        return True
+    except Exception:
+        return False
+
+
 def _load_runtime_overrides():
     global SENDER_FILTER, SUBJECT_FILTER, POLL_INTERVAL_MINUTES, POLL_INTERVAL_SECONDS, GMAIL_ENABLED, OUTLOOK_ENABLED, COHERE_API_KEY
     global GMAIL_AUTH_METHOD, GMAIL_IMAP_ADDRESS, GMAIL_IMAP_APP_PASSWORD
     global GEMINI_API_KEY, GROQ_API_KEY, AI_PROVIDER, COHERE_CHAT_MODEL, GEMINI_MODEL, GROQ_MODEL
     global PUBLIC_BASE_URL, GMAIL_PUBSUB_TOPIC
-    if not RUNTIME_CONFIG_PATH.exists():
-        return
-    try:
-        import json
-        data = json.loads(RUNTIME_CONFIG_PATH.read_text())
-    except Exception:
-        return
+
+    # Supabase is the source of truth when configured (survives Render's
+    # ephemeral disk across restarts/redeploys). Falls back to the local
+    # JSON file only when Supabase isn't set up or isn't reachable.
+    data = _fetch_runtime_row()
+    if data is None:
+        if not RUNTIME_CONFIG_PATH.exists():
+            return
+        try:
+            import json
+            data = json.loads(RUNTIME_CONFIG_PATH.read_text())
+        except Exception:
+            return
     if "senderFilter" in data:
         SENDER_FILTER = data["senderFilter"]
     if "subjectFilter" in data:
@@ -177,26 +215,33 @@ def _load_runtime_overrides():
 
 
 def save_runtime_overrides(**kwargs):
-    """Called from the API when Settings are changed. Persists to disk and
-    updates this module's live values without server restart.
+    """Called from the API when Settings are changed. Persists to Supabase
+    (so values survive Render restarts/redeploys) and updates this
+    module's live values without a server restart. Falls back to the
+    local JSON file if Supabase isn't configured/reachable.
 
-    NOTE: gmailImapAppPassword / geminiApiKey / cohereApiKey end up in
-    runtime_config.json in plaintext, same as they would in a .env file —
-    treat that file as a secret and keep it out of version control (see
-    .gitignore)."""
+    NOTE: gmailImapAppPassword / geminiApiKey / cohereApiKey are stored in
+    plaintext, same as they would be in a .env file — the runtime_settings
+    table is locked down with RLS (service_role key only), matching the
+    reports/deleted_reports tables."""
     import json
-    global SENDER_FILTER, SUBJECT_FILTER, POLL_INTERVAL_MINUTES, POLL_INTERVAL_SECONDS, GMAIL_ENABLED, OUTLOOK_ENABLED, COHERE_API_KEY
-    global GMAIL_AUTH_METHOD, GMAIL_IMAP_ADDRESS, GMAIL_IMAP_APP_PASSWORD
-    global GEMINI_API_KEY, GROQ_API_KEY, AI_PROVIDER, COHERE_CHAT_MODEL, GEMINI_MODEL, GROQ_MODEL
-    global PUBLIC_BASE_URL, GMAIL_PUBSUB_TOPIC
-    current = {}
-    if RUNTIME_CONFIG_PATH.exists():
+
+    # Merge with whatever's already stored, from whichever backend has it.
+    current = _fetch_runtime_row()
+    if current is None and RUNTIME_CONFIG_PATH.exists():
         try:
             current = json.loads(RUNTIME_CONFIG_PATH.read_text())
         except Exception:
             current = {}
+    current = current or {}
     current.update(kwargs)
-    RUNTIME_CONFIG_PATH.write_text(json.dumps(current, indent=2))
+
+    saved_to_supabase = _save_runtime_row(current)
+    if not saved_to_supabase:
+        # Local-file fallback keeps Settings working even if Supabase is
+        # temporarily unreachable — just won't survive a restart.
+        RUNTIME_CONFIG_PATH.write_text(json.dumps(current, indent=2))
+
     _load_runtime_overrides()
 
 
