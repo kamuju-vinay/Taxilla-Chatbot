@@ -455,7 +455,12 @@ async function askBackend(question, connected, history) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, history }),
-      signal: AbortSignal.timeout(45000),
+      // Must comfortably exceed the backend's own AI-provider timeout
+      // (45s per provider — see rag_engine.py). Matching it exactly here
+      // meant the frontend could abort the request right as the backend
+      // was about to finish, throwing a generic "something went wrong"
+      // error even when the backend was working correctly the whole time.
+      signal: AbortSignal.timeout(75000),
     });
     if (resp.ok) {
       const { text } = await resp.json();
@@ -534,6 +539,16 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
     return val.toLocaleString();
   };
 
+  // In the small inline card there isn't room for every category name, so
+  // leave Recharts to its default auto-thinning (it silently drops
+  // overlapping ticks). In the maximized/expanded view there IS room —
+  // angle every label and force interval={0} so every single bar gets
+  // its name instead of Recharts still skipping some out of habit.
+  const xAxisTickProps = showAxisLabels
+    ? { fontSize: 10, fill: BRAND.sub, angle: -40, textAnchor: "end" }
+    : { fontSize: 10, fill: BRAND.sub };
+  const xAxisExtraProps = showAxisLabels ? { interval: 0, height: 70 } : {};
+
   return (
     <div className="w-full" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
@@ -546,9 +561,9 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
             <Tooltip formatter={(value) => [typeof value === "number" ? value.toLocaleString() : value, "Value"]} />
           </PieChart>
         ) : activeType === "line" ? (
-          <LineChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 45 : 0 }}>
+          <LineChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 70 : 0 }}>
             <CartesianGrid vertical={false} stroke={BRAND.line} />
-            <XAxis dataKey="name" tick={{ fontSize: 10, fill: BRAND.sub }} tickLine={false} axisLine={{ stroke: BRAND.line }} />
+            <XAxis dataKey="name" tick={xAxisTickProps} tickLine={false} axisLine={{ stroke: BRAND.line }} {...xAxisExtraProps} />
             <YAxis tick={{ fontSize: 10, fill: BRAND.sub }} axisLine={false} tickLine={false} tickFormatter={formatNumber} />
             <Tooltip formatter={(val, name) => [typeof val === "number" ? val.toLocaleString() : val, name]} />
             {seriesKeys.length > 0 && <Legend wrapperStyle={{ fontSize: 10.5, paddingTop: 4 }} iconType="circle" />}
@@ -562,9 +577,9 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
           </LineChart>
         ) : isStacked ? (
           /* Stacked Bar Chart for multi-category comparative metrics */
-          <BarChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 45 : 0 }}>
+          <BarChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 70 : 0 }}>
             <CartesianGrid vertical={false} stroke={BRAND.line} />
-            <XAxis dataKey="name" tick={{ fontSize: 10, fill: BRAND.sub }} axisLine={{ stroke: BRAND.line }} tickLine={false} />
+            <XAxis dataKey="name" tick={xAxisTickProps} axisLine={{ stroke: BRAND.line }} tickLine={false} {...xAxisExtraProps} />
             <YAxis tick={{ fontSize: 10, fill: BRAND.sub }} axisLine={false} tickLine={false} tickFormatter={formatNumber} />
             <Tooltip formatter={(val, name) => [typeof val === "number" ? val.toLocaleString() : val, name]} />
             <Legend wrapperStyle={{ fontSize: 10.5, paddingTop: 4 }} iconType="circle" />
@@ -574,9 +589,9 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
           </BarChart>
         ) : (
           /* Standard Bar Chart for single series metrics */
-          <BarChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 45 : 0 }}>
+          <BarChart data={chart.data} margin={{ top: 20, right: 15, left: -5, bottom: showAxisLabels ? 70 : 0 }}>
             <CartesianGrid vertical={false} stroke={BRAND.line} />
-            <XAxis dataKey="name" tick={{ fontSize: 10, fill: BRAND.sub }} axisLine={{ stroke: BRAND.line }} tickLine={false} />
+            <XAxis dataKey="name" tick={xAxisTickProps} axisLine={{ stroke: BRAND.line }} tickLine={false} {...xAxisExtraProps} />
             <YAxis tick={{ fontSize: 10, fill: BRAND.sub }} axisLine={false} tickLine={false} tickFormatter={formatNumber} />
             <Tooltip formatter={(val, name) => [typeof val === "number" ? val.toLocaleString() : val, name]} />
             <Bar dataKey="value" radius={[4, 4, 0, 0]}>
@@ -2894,8 +2909,12 @@ function EmailProcessorView({ onBack, aiSettings, setAiSettings, onOpenSettings,
     name: files[0].name,
     size: files[0].size || "12 KB",
     date: files[0].date || new Date().toLocaleString([], { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }),
-    source: files[0].source === "gmail" ? "Gmail Mailbox" : (files[0].source || "System Report"),
-    sender: files[0].sender || "vinaykamuju594@gmail.com",
+    // Always presented as a native TAXILLA system report, never naming
+    // the mail provider it happened to arrive through — the underlying
+    // connector (Gmail/Outlook/manual upload) stays a Connectors-tab
+    // configuration detail, not something surfaced in the report itself.
+    source: "TAXILLA Connectors",
+    sender: files[0].sender || "TAXILLA System",
     subject: files[0].subject || files[0].name.replace(/\.[^/.]+$/, ""),
     ext: fileExt(files[0].name).toUpperCase(),
     downloadUrl: files[0].downloadUrl,
@@ -3206,7 +3225,7 @@ function EmailProcessorView({ onBack, aiSettings, setAiSettings, onOpenSettings,
             <div className="rounded-xl border border-dashed border-emerald-300 bg-[#F0FDF4] p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <div className="inline-flex items-center gap-1.5 text-[12px] font-bold text-emerald-800 bg-emerald-100/90 px-3.5 py-1 rounded-full shadow-xs">
-                  {fileDeleted ? "⚠️ Source File Removed" : activeReport ? `✓ Email received via ${activeReport.source}` : "✓ Email received successfully"}
+                  {fileDeleted ? "⚠️ Source File Removed" : activeReport ? "✓ Report received successfully" : "✓ Report received successfully"}
                 </div>
                 <button
                   onClick={() => setShowConvertedModal(true)}
@@ -3741,13 +3760,11 @@ export default function TaxillaChatbot() {
   const lastChart = [...messages].reverse().find((m) => m.chart)?.chart || null;
 
   const suggestedQuestions = React.useMemo(() => {
+    // No reports loaded at all — don't suggest anything rather than
+    // showing generic canned questions that may not apply to whatever
+    // gets uploaded next.
     if (!files || files.length === 0) {
-      return [
-        "Summarize overall reconciliation metrics and key totals",
-        "Compare emissions and energy consumption quantities",
-        "What is the total utility cost and expense breakdown?",
-        "Summarize overall transaction volume and summary",
-      ];
+      return [];
     }
 
     const primaryFile = files[0];
@@ -3762,11 +3779,27 @@ export default function TaxillaChatbot() {
       }
     }
 
+    // File not parsed yet (still hydrating) and no CSV context either —
+    // nothing real to base a suggestion on, so stay empty rather than
+    // guessing generic questions the data might not even support.
+    if (!primaryFile.parsed && !primaryFile.csvContext && columnNames.length === 0) {
+      return [];
+    }
+
     const textContext = ((primaryFile.csvContext || "") + " " + columnNames.join(" ") + " " + (primaryFile.name || "")).toLowerCase();
     const list = [];
 
-    if (textContext.includes("emission") || textContext.includes("scope") || textContext.includes("co2") || textContext.includes("energy")) {
-      list.push("Summarize Scope 2 emissions by utility type");
+    // Detect the actual scope number present (1/2/3) instead of assuming
+    // "Scope 2" regardless of what the report actually contains.
+    const scopeMatch = textContext.match(/scope\s*([123])/);
+    const scopeLabel = scopeMatch ? `Scope ${scopeMatch[1]}` : null;
+
+    if (scopeLabel) {
+      list.push(`Summarize ${scopeLabel} emissions by category`);
+      list.push(`Compare location vs market based emissions`);
+      list.push(`What is the energy consumption and cost breakdown?`);
+    } else if (textContext.includes("emission") || textContext.includes("co2") || textContext.includes("energy")) {
+      list.push("Summarize emissions by category");
       list.push("Compare location vs market based emissions");
       list.push("What is the energy consumption and cost breakdown?");
     } else if (textContext.includes("vendor") || textContext.includes("supplier") || textContext.includes("payee")) {
@@ -4068,20 +4101,24 @@ export default function TaxillaChatbot() {
           </div>
 
           <div className="border-t bg-white px-5 py-3 space-y-2.5" style={{ borderColor: BRAND.line }}>
-            {/* Predefined Questions Bar */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar" style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}>
-              {suggestedQuestions.map((q, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => handleSend(q)}
-                  className="shrink-0 rounded-full border bg-gray-50 px-3 py-1 text-[11.5px] font-medium text-gray-700 hover:bg-green-50 hover:text-green-800 hover:border-green-300 transition-colors cursor-pointer"
-                  style={{ borderColor: BRAND.line }}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
+            {/* Predefined Questions Bar — hidden entirely when there's
+                no data to base suggestions on, rather than showing an
+                empty strip or generic guesses. */}
+            {suggestedQuestions.length > 0 && (
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar" style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}>
+                {suggestedQuestions.map((q, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleSend(q)}
+                    className="shrink-0 rounded-full border bg-gray-50 px-3 py-1 text-[11.5px] font-medium text-gray-700 hover:bg-green-50 hover:text-green-800 hover:border-green-300 transition-colors cursor-pointer"
+                    style={{ borderColor: BRAND.line }}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="flex items-center gap-2 rounded-[5px] border px-3 py-2" style={{ borderColor: BRAND.line }}>
               <button onClick={() => fileInputRef.current?.click()} className="text-gray-400 hover:text-gray-600 shrink-0" title="Upload System Report File">
