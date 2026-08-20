@@ -460,7 +460,7 @@ class ReportRAGEngine:
             log.error("Cohere chat call failed: %s", e)
             return None
 
-    def _generate_gemini(self, prompt: str, timeout: int = 30):
+    def _generate_gemini(self, prompt: str, timeout: int = 45):
         if not self.gemini_api_key or requests is None:
             return None
         url = GEMINI_URL_TMPL.format(model=self.gemini_model)
