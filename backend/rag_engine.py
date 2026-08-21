@@ -201,7 +201,7 @@ def _scrub_metadata_leakage(answer_text):
 # numbers is deterministic given deterministic prose, and self-consistent
 # by construction — the table/chart can never disagree with the text.
 _LABELED_FIGURE_RE = re.compile(
-    r"(?<![A-Za-z0-9])([A-Z][A-Za-z0-9][A-Za-z0-9 &/\-]{1,68}?)\s*\(\s*\$?([\d][\d,]*\.?\d*)\s*([A-Za-z%$]{0,10}[A-Za-z0-9²]{0,4})?\s*\)"
+    r"(?<![A-Za-z0-9])['\"\u2018\u201c]?([A-Z][A-Za-z0-9][A-Za-z0-9 &/\-]{1,68}?)['\"\u2019\u201d]?\s*\(\s*\$?([\d][\d,]*\.?\d*)\s*([A-Za-z%$]{0,10}[A-Za-z0-9²]{0,4})?\s*\)"
 )
 _MD_TABLE_RE = re.compile(r"^\s*\|.+\|\s*$", re.MULTILINE)
 
@@ -214,7 +214,13 @@ def _extract_labeled_figures(answer_text):
     seen = set()
     out = []
     for label, value_str, unit in _LABELED_FIGURE_RE.findall(answer_text):
-        label = label.strip().rstrip(",;:")
+        # Strip a stray leading/trailing quote the regex may not have
+        # fully consumed (straight or curly), plus trailing punctuation —
+        # the model sometimes wraps category names in quotes for
+        # emphasis, e.g. 'Downstream Transportation and Distribution'
+        # ($5,652.46), which would otherwise leave a quote character
+        # stuck to the label.
+        label = label.strip().strip("'\u2018\u2019\u201c\u201d\"").rstrip(",;:")
         # Skip junk matches: bare numbers/years mistaken for labels, or
         # labels that are themselves mostly numeric (date ranges etc.)
         if len(label) < 3 or re.fullmatch(r"[\d/\-\s]+", label):
