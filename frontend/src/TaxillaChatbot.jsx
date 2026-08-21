@@ -566,16 +566,18 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
     return val.toLocaleString();
   };
 
-  // In the small inline card there isn't room for every category name, so
-  // leave Recharts to its default auto-thinning (it silently drops
-  // overlapping ticks). In the maximized/expanded view there IS room —
-  // use the truncating custom tick so every bar gets a short label, with
-  // the full name available on hover, instead of either cramming in long
-  // full names or still dropping some out of habit.
+  // In the small inline card there's no room for category names at all —
+  // previously this relied on Recharts' default auto-thinning, which
+  // still squeezes in a couple of labels wherever it finds space (as
+  // seen with "Employee Commuting" / "Investments" showing through even
+  // in the compact card). Now hidden entirely in the mini view; hovering
+  // a bar still shows its full name + value via the tooltip, which is
+  // the only affordance needed at that size. Full labels return in the
+  // maximized/expanded view via the truncating custom tick.
   const xAxisTickProps = showAxisLabels
     ? <TruncatedAxisTick />
-    : { fontSize: 10, fill: BRAND.sub };
-  const xAxisExtraProps = showAxisLabels ? { interval: 0, height: 60 } : {};
+    : false;
+  const xAxisExtraProps = showAxisLabels ? { interval: 0, height: 60 } : { height: 0 };
 
   return (
     <div className="w-full" style={{ height }}>
