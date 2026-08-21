@@ -3785,7 +3785,15 @@ export default function TaxillaChatbot() {
     ? files.filter((f) => f.name.toLowerCase().includes(search.trim().toLowerCase()))
     : files;
 
-  const lastChart = [...messages].reverse().find((m) => m.chart)?.chart || null;
+  // Reflects only the MOST RECENT bot reply's chart — not the last
+  // reply that happened to have one. Previously this searched backward
+  // through the whole conversation for any past message with a chart,
+  // so a chartless reply (a greeting, a single-figure answer, or any
+  // question whose data genuinely has nothing worth visualizing) left a
+  // stale, irrelevant chart from an earlier question sitting in the
+  // panel instead of clearing it.
+  const lastBotMessage = [...messages].reverse().find((m) => m.role === "bot");
+  const lastChart = lastBotMessage?.chart || null;
 
   const suggestedQuestions = React.useMemo(() => {
     // No reports loaded at all — don't suggest anything rather than
