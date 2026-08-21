@@ -524,6 +524,33 @@ function ToggleSwitch({ on, onClick, size = "md" }) {
 
 const STACK_COLORS = ["#059669", "#6366F1", "#F59E0B", "#0284C7", "#8B5CF6", "#EC4899", "#14B8A6"];
 
+// Custom XAxis tick for the maximized chart view: truncates long category
+// names (e.g. "Downstream Transportation and Distribution" -> "Downstream
+// Transp...") so labels stay readable side-by-side, while a native SVG
+// <title> element shows the full name as a browser tooltip on hover —
+// no extra library needed, works the same as a native HTML title attr.
+const MAX_TICK_LABEL_CHARS = 14;
+function TruncatedAxisTick({ x, y, payload, angle = -40 }) {
+  const full = String(payload.value ?? "");
+  const short = full.length > MAX_TICK_LABEL_CHARS ? full.slice(0, MAX_TICK_LABEL_CHARS - 1) + "…" : full;
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text
+        x={0}
+        y={0}
+        dy={10}
+        fontSize={10}
+        fill={BRAND.sub}
+        textAnchor="end"
+        transform={`rotate(${angle})`}
+      >
+        {short}
+        {full.length > MAX_TICK_LABEL_CHARS && <title>{full}</title>}
+      </text>
+    </g>
+  );
+}
+
 function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
   if (!chart || !chart.data || !chart.data.length) return null;
 
@@ -542,12 +569,13 @@ function ChartBlock({ chart, height = 230, showAxisLabels = false }) {
   // In the small inline card there isn't room for every category name, so
   // leave Recharts to its default auto-thinning (it silently drops
   // overlapping ticks). In the maximized/expanded view there IS room —
-  // angle every label and force interval={0} so every single bar gets
-  // its name instead of Recharts still skipping some out of habit.
+  // use the truncating custom tick so every bar gets a short label, with
+  // the full name available on hover, instead of either cramming in long
+  // full names or still dropping some out of habit.
   const xAxisTickProps = showAxisLabels
-    ? { fontSize: 10, fill: BRAND.sub, angle: -40, textAnchor: "end" }
+    ? <TruncatedAxisTick />
     : { fontSize: 10, fill: BRAND.sub };
-  const xAxisExtraProps = showAxisLabels ? { interval: 0, height: 70 } : {};
+  const xAxisExtraProps = showAxisLabels ? { interval: 0, height: 60 } : {};
 
   return (
     <div className="w-full" style={{ height }}>
@@ -3768,58 +3796,102 @@ export default function TaxillaChatbot() {
     }
 
     const primaryFile = files[0];
-    let columnNames = [];
+    // Real column names, per sheet — this is the ground truth for what
+    // questions can honestly be asked, rather than guessing from a
+    // handful of keyword buckets. e.g. a report only has a location-vs-
+    // market-based split if columns actually contain that split; we
+    // don't assume it just because the word "scope" appears somewhere.
+    let allColumns = [];
     if (primaryFile.sheets) {
-      const sheetNames = Object.keys(primaryFile.sheets);
-      for (const name of sheetNames) {
-        const rows = primaryFile.sheets[name];
+      for (const sheetName of Object.keys(primaryFile.sheets)) {
+        const rows = primaryFile.sheets[sheetName];
         if (rows && rows.length > 0) {
-          columnNames.push(...Object.keys(rows[0] || {}));
+          allColumns.push(...Object.keys(rows[0] || {}));
         }
       }
     }
+    allColumns = Array.from(new Set(allColumns));
 
     // File not parsed yet (still hydrating) and no CSV context either —
     // nothing real to base a suggestion on, so stay empty rather than
     // guessing generic questions the data might not even support.
-    if (!primaryFile.parsed && !primaryFile.csvContext && columnNames.length === 0) {
+    if (!primaryFile.parsed && !primaryFile.csvContext && allColumns.length === 0) {
       return [];
     }
 
-    const textContext = ((primaryFile.csvContext || "") + " " + columnNames.join(" ") + " " + (primaryFile.name || "")).toLowerCase();
+    const csvBlob = (primaryFile.csvContext || "").toLowerCase();
+    const colBlob = allColumns.join(" | ");
+    const colBlobLower = colBlob.toLowerCase();
     const list = [];
 
-    // Detect the actual scope number present (1/2/3) instead of assuming
-    // "Scope 2" regardless of what the report actually contains.
-    const scopeMatch = textContext.match(/scope\s*([123])/);
-    const scopeLabel = scopeMatch ? `Scope ${scopeMatch[1]}` : null;
+    const anyColumnMatches = (regex) => allColumns.some((c) => regex.test(c));
+    const findColumn = (regex) => allColumns.find((c) => regex.test(c));
 
-    if (scopeLabel) {
-      list.push(`Summarize ${scopeLabel} emissions by category`);
-      list.push(`Compare location vs market based emissions`);
-      list.push(`What is the energy consumption and cost breakdown?`);
-    } else if (textContext.includes("emission") || textContext.includes("co2") || textContext.includes("energy")) {
-      list.push("Summarize emissions by category");
+    // 1. Category-style breakdown — only fires if columns literally look
+    // like "Emissions from 1. X", "Category 2 ...", etc. Uses the real
+    // count and scope number found, instead of assuming "Scope 2".
+    const categoryColumns = allColumns.filter((c) => /^\s*(emissions?\s+from|category)\s*\d+/i.test(c));
+    const scopeMatch = (colBlobLower + " " + csvBlob + " " + (primaryFile.name || "").toLowerCase()).match(/scope\s*([123])/);
+    if (categoryColumns.length >= 2) {
+      const scopeLabel = scopeMatch ? `Scope ${scopeMatch[1]}` : "";
+      list.push(`Summarize ${scopeLabel} emissions across all ${categoryColumns.length} categories`.replace(/\s+/g, " ").trim());
+    } else if (scopeMatch && (csvBlob.includes("emission") || colBlobLower.includes("emission"))) {
+      list.push(`Summarize Scope ${scopeMatch[1]} emissions by category`);
+    }
+
+    // 2. Location-based vs market-based — ONLY a real Scope 2 concept;
+    // previously this was suggested for any report mentioning "scope"
+    // at all, including Scope 3 reports where it doesn't apply.
+    if (anyColumnMatches(/location.{0,3}based/i) && anyColumnMatches(/market.{0,3}based/i)) {
       list.push("Compare location vs market based emissions");
-      list.push("What is the energy consumption and cost breakdown?");
-    } else if (textContext.includes("vendor") || textContext.includes("supplier") || textContext.includes("payee")) {
+    }
+
+    // 3. Facility/entity-level breakdown — only if the report actually
+    // has a facility or entity identifier alongside some liability or
+    // emissions figure to break down.
+    const facilityCol = findColumn(/facility\s*(name|id)/i);
+    const liabilityCol = findColumn(/carbon\s*liability/i);
+    const emissionsCol = findColumn(/total.*emission|emissions?\s*\(/i);
+    if (facilityCol && (liabilityCol || emissionsCol)) {
+      const metric = liabilityCol || emissionsCol;
+      list.push(`Which facility has the highest ${metric.replace(/[_-]/g, " ").trim().toLowerCase()}?`);
+    }
+
+    // 4. Cost / carbon liability distribution — references the real
+    // column name found rather than a generic "cost" guess. Strip a
+    // leading "total" from the column name itself before prepending
+    // "the total", so columns already named "Total Carbon Liability"
+    // don't produce "the total total carbon liability".
+    const costCol = findColumn(/carbon\s*liability|unit\s*carbon\s*cost|total\s*cost|amount|price/i);
+    if (costCol && list.length < 4) {
+      const costLabel = costCol.replace(/[_-]/g, " ").trim().toLowerCase().replace(/^total\s+/, "");
+      list.push(`What is the total ${costLabel} and how is it distributed?`);
+    }
+
+    // 5. Quantity-style columns (waste, quantity sold, distance, etc.)
+    const qtyCol = findColumn(/quantity|distance\s*\(km\)/i);
+    if (qtyCol && list.length < 4) {
+      list.push(`What is the breakdown of ${qtyCol.replace(/[_-]/g, " ").trim().toLowerCase()}?`);
+    }
+
+    // 6. Vendor/supplier-style reports (non-emissions financial data)
+    if (list.length === 0 && (colBlobLower.includes("vendor") || colBlobLower.includes("supplier") || colBlobLower.includes("payee"))) {
       list.push("Summarize vendor balances and transaction totals");
-      list.push("What is the breakdown of top vendor line-item amounts?");
-    } else if (textContext.includes("tax") || textContext.includes("gst") || textContext.includes("vat")) {
+      const vendorAmountCol = findColumn(/amount|balance|total/i);
+      if (vendorAmountCol) list.push(`What is the breakdown of top vendor ${vendorAmountCol.toLowerCase()}?`);
+    }
+
+    // 7. Tax-style reports
+    if (list.length === 0 && (colBlobLower.includes("tax") || colBlobLower.includes("gst") || colBlobLower.includes("vat"))) {
       list.push("Summarize tax liability and return totals");
-      list.push("Compare monthly GST / tax reconciliation variances");
-    } else {
-      list.push("Summarize transaction metrics and primary totals");
-      list.push("Compare key statistical reconciliation figures");
     }
 
-    if (textContext.includes("cost") || textContext.includes("amount") || textContext.includes("price") || textContext.includes("val")) {
-      list.push("What is the cost distribution and total quantities?");
-    } else {
-      list.push("What is the overall transaction volume and summary?");
+    // 8. Last resort — only if genuinely nothing specific was detected
+    // despite having real columns, so the person isn't left with zero
+    // suggestions on an unrecognized-but-real report.
+    if (list.length === 0 && allColumns.length > 0) {
+      list.push("Summarize the key totals in this report");
     }
-
-    list.push("Summarize variance and reconciliation trends across active reports");
 
     return Array.from(new Set(list)).slice(0, 4);
   }, [files]);
