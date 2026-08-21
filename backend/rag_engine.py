@@ -200,20 +200,37 @@ def _scrub_metadata_leakage(answer_text):
 # answer even at low temperature. Deriving from the model's own cited
 # numbers is deterministic given deterministic prose, and self-consistent
 # by construction — the table/chart can never disagree with the text.
-_LABELED_FIGURE_RE = re.compile(
+_LABELED_FIGURE_RE_PAREN = re.compile(
     r"(?<![A-Za-z0-9])['\"\u2018\u201c]?([A-Z][A-Za-z0-9][A-Za-z0-9 &/\-]{1,68}?)['\"\u2019\u201d]?\s*\(\s*\$?([\d][\d,]*\.?\d*)\s*([A-Za-z%$]{0,10}[A-Za-z0-9²]{0,4})?\s*\)"
+)
+# Matches "Label text: 12,345.67 unit" or "Label text - 12,345.67 unit" —
+# the colon/dash style the model sometimes uses instead of parentheses,
+# most often inside a bullet list. Anchored to the start of a line (after
+# optional bullet markers) so it doesn't fire mid-sentence on things like
+# clock times or ratios.
+_LABELED_FIGURE_RE_COLON = re.compile(
+    r"^\s*(?:[-*•]\s*)?['\"\u2018\u201c]?([A-Z][A-Za-z0-9][A-Za-z0-9 &/\-]{1,68}?)['\"\u2019\u201d]?\s*[:\u2013\u2014-]\s*\$?([\d][\d,]*\.?\d*)\s*([A-Za-z%$]{0,10}[A-Za-z0-9²]{0,4})?\s*$",
+    re.MULTILINE,
 )
 _MD_TABLE_RE = re.compile(r"^\s*\|.+\|\s*$", re.MULTILINE)
 
 
 def _extract_labeled_figures(answer_text):
     """Returns a list of (label, value_float, unit) tuples parsed from the
-    model's own prose, deduplicated by label (first occurrence wins)."""
+    model's own prose, deduplicated by label (first occurrence wins).
+    Covers both '(value)' and 'Label: value' / 'Label - value' bullet
+    styles, since limiting to parentheses only meant many otherwise
+    perfectly good multi-item answers never got a table simply because
+    the model happened to phrase the breakdown as a colon-separated
+    bullet list instead."""
     if not answer_text:
         return []
     seen = set()
     out = []
-    for label, value_str, unit in _LABELED_FIGURE_RE.findall(answer_text):
+    all_matches = list(_LABELED_FIGURE_RE_PAREN.finditer(answer_text)) + list(_LABELED_FIGURE_RE_COLON.finditer(answer_text))
+    all_matches.sort(key=lambda m: m.start())
+    for m in all_matches:
+        label, value_str, unit = m.group(1), m.group(2), m.group(3)
         # Strip a stray leading/trailing quote the regex may not have
         # fully consumed (straight or curly), plus trailing punctuation —
         # the model sometimes wraps category names in quotes for
