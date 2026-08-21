@@ -303,22 +303,50 @@ def _scrub_json_answer(raw_json_text):
     """The model's raw response is expected to be a JSON string with an
     "answer" field (see _SYSTEM_PROMPT_TMPL). Parses it, scrubs just that
     field, enforces consistent table/chart presentation, and re-
-    serializes — leaves the string untouched (rather than raising) if it
-    isn't valid JSON, since the caller/frontend already has its own
-    tolerant fallback parsing for that case."""
-    try:
-        text = raw_json_text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        data = json.loads(text)
+    serializes.
+
+    Falls back to extracting just the {...} substring (first "{" through
+    matching last "}") if the model added any stray preamble/postamble
+    text around the JSON object despite instructions not to — this is
+    what previously caused the raw, un-parsed model text (including any
+    such wrapper text) to leak straight into the chat as literal text
+    whenever it happened, since a strict json.loads() on the whole
+    string would fail outright. Only truly falls through to returning
+    the raw text unchanged if even that substring isn't valid JSON."""
+    text = raw_json_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    def _try_parse(candidate):
+        data = json.loads(candidate)
         if isinstance(data, dict) and "answer" in data:
             data["answer"] = _scrub_metadata_leakage(data["answer"])
             data = _enforce_consistent_answer(data)
             return json.dumps(data)
-        return raw_json_text
+        return None
+
+    try:
+        result = _try_parse(text)
+        if result is not None:
+            return result
     except Exception:
-        return raw_json_text
+        pass
+
+    # Fallback: the model may have added a leading sentence or trailing
+    # commentary around the actual JSON object — extract just the {...}
+    # span and try that instead of giving up immediately.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            result = _try_parse(text[start:end + 1])
+            if result is not None:
+                return result
+        except Exception:
+            pass
+
+    return raw_json_text
 
 
 class LocalTfidfIndex:

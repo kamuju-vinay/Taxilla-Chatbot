@@ -396,10 +396,37 @@ function extractChartFromText(text) {
   return null;
 }
 
+// Best-effort extraction of just the answer text via regex, used only
+// when full JSON.parse has already failed on both the whole string and
+// the {...} substring within it — handles a properly-escaped "answer"
+// field even inside otherwise-malformed surrounding JSON.
+function extractAnswerFieldViaRegex(text) {
+  const match = /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text || "");
+  if (!match) return null;
+  try {
+    // Reuse JSON's own string-literal parsing (quotes + escapes) rather
+    // than hand-rolling unescape logic.
+    return JSON.parse(`"${match[1]}"`);
+  } catch {
+    return null;
+  }
+}
+
+// True if the text still looks like raw/malformed JSON rather than
+// genuine prose — used as a last-resort guard so a parsing failure
+// never results in a raw JSON blob being shown to the person, which is
+// what happened before this fallback existed (a whole {"answer": ...,
+// "chartData": [...]} object rendered verbatim as the chat message).
+function looksLikeRawJson(text) {
+  const t = (text || "").trim();
+  return t.startsWith("{") && /"answer"\s*:/.test(t);
+}
+
 function parseModelJson(text) {
   const clean = (text || "").replace(/^```json\s*|```$/g, "").trim();
-  try {
-    const parsed = JSON.parse(clean);
+
+  const tryParse = (candidate) => {
+    const parsed = JSON.parse(candidate);
     const ansText = parsed.answer || parsed.text || (typeof parsed === "string" ? parsed : null);
 
     // The backend's own chartData is the trustworthy signal — it comes
@@ -428,13 +455,40 @@ function parseModelJson(text) {
       text: ansText || "Here is the summary of the report data.",
       chart,
     };
-  } catch {
-    const fallbackText = text || "I couldn't process that just now — try rephrasing your question.";
-    return {
-      text: fallbackText,
-      chart: extractChartFromText(fallbackText),
-    };
+  };
+
+  try {
+    return tryParse(clean);
+  } catch { /* fall through to the {...}-substring attempt below */ }
+
+  // The model may have added a leading sentence or trailing commentary
+  // around the actual JSON object despite instructions not to — try
+  // extracting just the {...} span before giving up on structured
+  // parsing entirely.
+  const start = clean.indexOf("{");
+  const end = clean.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    try {
+      return tryParse(clean.slice(start, end + 1));
+    } catch { /* fall through */ }
   }
+
+  // Last resort: pull just the answer text out via regex rather than
+  // showing the whole (still-malformed) JSON blob verbatim.
+  const regexAnswer = extractAnswerFieldViaRegex(clean);
+  if (regexAnswer) {
+    return { text: regexAnswer, chart: extractChartFromText(regexAnswer) };
+  }
+
+  // Nothing parsed. Never show raw/malformed JSON as the chat message —
+  // fall back to a friendly generic message instead.
+  const fallbackText = looksLikeRawJson(text)
+    ? "I had trouble formatting that answer — please try asking again."
+    : (text || "I couldn't process that just now — try rephrasing your question.");
+  return {
+    text: fallbackText,
+    chart: extractChartFromText(fallbackText),
+  };
 }
 
 /* The backend is the sole source of truth for answers — it re-reads the
