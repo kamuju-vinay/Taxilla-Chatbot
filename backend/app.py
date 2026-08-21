@@ -521,6 +521,10 @@ def ask():
     try:
         rag_text = rag_engine.ask(question, chunks, top_k=6, provider=provider)
         if rag_text:
+            # TEMP DEBUG: log a preview so we can verify table formatting
+            # is actually present in the model's answer without guessing
+            # from response byte-size alone. Safe to remove once confirmed.
+            log.info("ASK DEBUG q=%r resp_preview=%r", question[:80], rag_text[:600])
             return jsonify({"text": rag_text})
     except Exception as e:
         log.exception("RAG ask() failed: %s", e)
