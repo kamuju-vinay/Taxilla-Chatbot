@@ -244,17 +244,38 @@ def _build_markdown_table(pairs):
 
 def _enforce_consistent_answer(data):
     """Guarantees the same underlying facts render the same way every
-    time: if the model cited 2+ labeled figures in its prose, a markdown
-    table covering them is REQUIRED (added if the model omitted it), and
-    chartData is REBUILT from those same cited figures rather than left
-    as whatever the model separately sampled — which is what produced a
-    degenerate single-bar chart with a category count instead of real
-    values on a repeat question. Left untouched for genuinely single-
-    figure answers, greetings, or model-provided multi-series/stacked
-    charts (seriesKeys present) that this simple extraction can't safely
-    reconstruct."""
+    time — deliberately independent of conversation history, so a
+    repeat/rephrased question gets the same table/chart regardless of
+    what's in the history_section that turn: if the model cited 2+
+    labeled figures in its prose, a markdown table covering them is
+    REQUIRED (added if the model omitted it), and chartData is REBUILT
+    from those same cited figures rather than left as whatever the model
+    separately sampled — which is what produced a degenerate single-bar
+    chart with a category count instead of real values on one repeat,
+    and a broken multi-series/legend-only render on another (the model
+    hallucinated a seriesKeys value with no real comparative data behind
+    it). Left untouched for genuinely single-figure answers, greetings,
+    and GENUINE model-provided stacked/multi-series charts — validated
+    below by checking the series names actually appear in the answer
+    text, not just trusting any seriesKeys the model happened to emit."""
     answer = data.get("answer") or ""
     pairs = _extract_labeled_figures(answer)
+
+    # A model-supplied seriesKeys is only trusted as a real multi-series
+    # comparison if EVERY series name it claims actually appears in the
+    # model's own answer text — otherwise it's most likely a hallucinated
+    # field with no real comparative data behind it (the exact cause of
+    # a legend-only, bar-less chart render), and should be cleared so
+    # the deterministic single-series override below can run instead.
+    series_keys = data.get("seriesKeys") or []
+    answer_lower = answer.lower()
+    has_genuine_series = bool(series_keys) and all(
+        isinstance(k, str) and k.strip() and k.strip().lower() in answer_lower for k in series_keys
+    )
+    if series_keys and not has_genuine_series:
+        data["seriesKeys"] = None
+        data["stacked"] = None
+
     if len(pairs) < 2:
         return data
 
@@ -262,9 +283,9 @@ def _enforce_consistent_answer(data):
         data["answer"] = answer.rstrip() + "\n\n" + _build_markdown_table(pairs)
 
     # Only override chartData for simple single-series charts — a
-    # model-built stacked/multi-series comparison (seriesKeys present)
-    # isn't something this label→single-value extraction can safely
-    # reconstruct, so leave those as the model provided.
+    # GENUINE model-built stacked/multi-series comparison (validated
+    # above) isn't something this label→single-value extraction can
+    # safely reconstruct, so leave those as the model provided.
     if not data.get("seriesKeys"):
         data["chartData"] = [{"name": label, "value": value} for label, value, _ in pairs]
         if not data.get("chartType"):
