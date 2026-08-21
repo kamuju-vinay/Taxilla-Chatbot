@@ -442,7 +442,7 @@ function parseModelJson(text) {
  * function no longer contains any hardcoded/fabricated report content;
  * if the backend can't be reached, the person is told that honestly
  * rather than being shown made-up numbers. */
-async function askBackend(question, connected, history) {
+async function askBackend(question, connected) {
   if (!connected) {
     return {
       text: "I can't reach the TAXILLA backend service right now, so I don't have access to your reports. " +
@@ -454,7 +454,7 @@ async function askBackend(question, connected, history) {
     const resp = await apiFetch(`/api/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history }),
+      body: JSON.stringify({ question }),
       // Must comfortably exceed the backend's own AI-provider timeout
       // (45s per provider — see rag_engine.py). Matching it exactly here
       // meant the frontend could abort the request right as the backend
@@ -473,8 +473,8 @@ async function askBackend(question, connected, history) {
   };
 }
 
-async function askAssistant(question, files, settings, connected, vizOn = true, history = []) {
-  let res = await askBackend(question, connected, history);
+async function askAssistant(question, files, settings, connected, vizOn = true) {
+  let res = await askBackend(question, connected);
 
   if (vizOn && res) {
     if (!res.chart && res.text) {
@@ -4007,16 +4007,7 @@ export default function TaxillaChatbot() {
     setSending(true);
 
       try {
-      const history = messages
-        .filter((m) => m.role === "user" || m.role === "bot")
-        .slice(-12)
-        .reduce((pairs, m, i, arr) => {
-          if (m.role === "user" && arr[i + 1]?.role === "bot") {
-            pairs.push({ question: m.text, answer: arr[i + 1].text });
-          }
-          return pairs;
-        }, []);
-      const res = await askAssistant(text, files, aiSettings, connected, vizOn, history);
+      const res = await askAssistant(text, files, aiSettings, connected, vizOn);
       setMessages((prev) => [
         ...prev,
         {

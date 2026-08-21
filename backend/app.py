@@ -519,8 +519,7 @@ def ask():
         return jsonify({"text": _no_reports_response()})
 
     try:
-        history = body.get("history") or []
-        rag_text = rag_engine.ask(question, chunks, top_k=6, provider=provider, history=history)
+        rag_text = rag_engine.ask(question, chunks, top_k=6, provider=provider)
         if rag_text:
             return jsonify({"text": rag_text})
     except Exception as e:

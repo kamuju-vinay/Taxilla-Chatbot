@@ -5,7 +5,8 @@ TF-IDF cosine-similarity search (no external embedding API required —
 Cohere is used automatically instead for retrieval if COHERE_API_KEY is
 configured, since it gives materially better results), and generates the
 final answer with Cohere, Gemini, or Groq (your choice, via AI_PROVIDER),
-strictly grounded in the retrieved chunks plus recent conversation history.
+strictly grounded in the retrieved chunks (each question answered
+independently — no conversation history is referenced).
 
 No fabricated / hardcoded report content lives in this file. If nothing
 relevant is found, the model is instructed to say so plainly.
@@ -50,18 +51,14 @@ GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_MODEL_DEFAULT = "openai/gpt-oss-120b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-# How many past question/answer pairs to include as context for follow-up
-# questions (e.g. "rephrase my last question", "what about the other one").
-MAX_HISTORY_TURNS = 6
-
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _SYSTEM_PROMPT_TMPL = (
     "You are the TAXILLA AI Assistant, embedded in the TAXILLA Compliance & Reconciliation Platform. "
     "Answer the user's question using ONLY the TAXILLA SYSTEM REPORT DATA below — never invent numbers, "
     "names, or facts that are not present in it. If the answer isn't in the data, state clearly "
-    "that the data is not available in current TAXILLA system reports.\n\n"
+    "that the data is not available in current TAXILLA system reports. Answer this question "
+    "independently — do not reference or assume anything from earlier questions in this session.\n\n"
     "CONVERSATIONAL MESSAGES: If the user's message is a greeting, farewell, thanks, or other small talk "
     "(e.g. 'hi', 'hello', 'good morning', 'bye', 'thank you', 'thanks a lot', 'how are you') with no "
     "actual data question in it, respond naturally and briefly in kind (a short greeting back, a warm "
@@ -83,7 +80,6 @@ _SYSTEM_PROMPT_TMPL = (
     "5. Use precomputed statistics directly whenever present.\n"
     "6. VISUALIZATION MANDATE: Whenever your answer contains numbers, totals, emissions, quantities, costs, or metric values, YOU MUST ALWAYS GENERATE A VALID VISUALIZATION CHART! "
     "When comparing multiple approaches or categories (e.g. Location Based vs Market Based), USE A STACKED BAR CHART by setting stacked=true, seriesKeys=['Location Based', 'Market Based'], and chartData containing metrics for each category.\n\n"
-    "{history_section}"
     "TAXILLA SYSTEM REPORT DATA:\n{context}\n\n"
     "QUESTION: {query}\n\n"
     "Respond with ONLY raw JSON, no markdown fences, no preamble, matching exactly this shape:\n"
@@ -244,14 +240,12 @@ def _build_markdown_table(pairs):
 
 def _enforce_consistent_answer(data):
     """Guarantees the same underlying facts render the same way every
-    time — deliberately independent of conversation history, so a
-    repeat/rephrased question gets the same table/chart regardless of
-    what's in the history_section that turn: if the model cited 2+
-    labeled figures in its prose, a markdown table covering them is
-    REQUIRED (added if the model omitted it), and chartData is REBUILT
-    from those same cited figures rather than left as whatever the model
-    separately sampled — which is what produced a degenerate single-bar
-    chart with a category count instead of real values on one repeat,
+    time: if the model cited 2+ labeled figures in its prose, a markdown
+    table covering them is REQUIRED (added if the model omitted it), and
+    chartData is REBUILT from those same cited figures rather than left
+    as whatever the model separately sampled — which is what produced a
+    degenerate single-bar chart with a category count instead of real
+    values on one repeat,
     and a broken multi-series/legend-only render on another (the model
     hallucinated a seriesKeys value with no real comparative data behind
     it). Left untouched for genuinely single-figure answers, greetings,
@@ -316,28 +310,6 @@ def _scrub_json_answer(raw_json_text):
         return raw_json_text
     except Exception:
         return raw_json_text
-
-
-def _build_history_section(history):
-    """history: list of {"question": str, "answer": str} pairs, oldest
-    first. Returns a prompt section (or "" if no history), trimmed to the
-    most recent MAX_HISTORY_TURNS turns so the prompt doesn't grow
-    unbounded over a long conversation."""
-    if not history:
-        return ""
-    recent = history[-MAX_HISTORY_TURNS:]
-    lines = ["CONVERSATION HISTORY (most recent last — use this to understand follow-up "
-              "questions like 'rephrase that' or 'what about the other one', but still ground "
-              "every factual answer in REPORT DATA below, not in what you said earlier):"]
-    for turn in recent:
-        q = (turn.get("question") or "").strip()
-        a = (turn.get("answer") or "").strip()
-        if q:
-            lines.append(f"User: {q}")
-        if a:
-            lines.append(f"Assistant: {a}")
-    lines.append("")  # blank line separator before REPORT DATA
-    return "\n".join(lines) + "\n\n"
 
 
 class LocalTfidfIndex:
@@ -646,15 +618,13 @@ class ReportRAGEngine:
             log.error("Groq chat completion call failed: %s", e)
             return None
 
-    def ask(self, query: str, chunks, top_k: int = 6, provider: str = None, history=None):
+    def ask(self, query: str, chunks, top_k: int = 6, provider: str = None):
         """Returns the raw JSON-string answer from whichever provider is
         configured (Cohere, Gemini, or Groq), or None if none is available /
         the call failed (caller decides the fallback message).
 
-        history: optional list of {"question": str, "answer": str} pairs
-        from earlier in this conversation, oldest first — lets the model
-        handle follow-ups like "rephrase that" without needing report data
-        to answer them."""
+        Each call is answered independently, grounded only in the current
+        REPORT DATA — no prior conversation turns are referenced."""
         # For small/medium report sets, skip top-k retrieval and send every
         # chunk. Retrieval can silently drop rows needed for sums, counts,
         # or comparisons spanning many rows — correctness matters more than
@@ -666,8 +636,7 @@ class ReportRAGEngine:
         else:
             relevant = self.retrieve(query, chunks, top_k=top_k)
         context = "\n\n---\n\n".join(r["text"] for r in relevant) if relevant else "(no reports attached yet)"
-        history_section = _build_history_section(history)
-        prompt = _SYSTEM_PROMPT_TMPL.format(history_section=history_section, context=context, query=query)
+        prompt = _SYSTEM_PROMPT_TMPL.format(context=context, query=query)
 
         chosen = (provider or self.ai_provider or "cohere").lower()
         order = [chosen] + [p for p in ("cohere", "gemini", "groq") if p != chosen]
