@@ -125,6 +125,20 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
+def _sb_client():
+    """Shared helper for a Supabase client with an explicit, short
+    timeout. Without this, create_client()'s underlying httpx client had
+    no bound at all — and since _load_runtime_overrides() runs at
+    config.py's MODULE IMPORT time (see bottom of this file), a slow or
+    unreachable Supabase project didn't just fail one request, it hung
+    the entire gunicorn worker before it ever finished booting, so the
+    whole app never came up and never served a single request. Same
+    class of bug as the AI-provider timeouts fixed earlier, just far more
+    severe here because of *when* this particular call happens."""
+    from supabase import create_client, ClientOptions
+    return create_client(SUPABASE_URL, SUPABASE_KEY, options=ClientOptions(postgrest_client_timeout=8, storage_client_timeout=8))
+
+
 def _fetch_runtime_row():
     """Read the single runtime_settings row from Supabase. Returns the
     stored dict, or None if Supabase isn't configured/reachable (caller
@@ -132,8 +146,7 @@ def _fetch_runtime_row():
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     try:
-        from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        client = _sb_client()
         res = client.table("runtime_settings").select("data").eq("id", 1).execute()
         if res.data:
             return res.data[0]["data"]
@@ -149,8 +162,7 @@ def _save_runtime_row(data):
     if not SUPABASE_URL or not SUPABASE_KEY:
         return False
     try:
-        from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        client = _sb_client()
         client.table("runtime_settings").upsert({"id": 1, "data": data}).execute()
         return True
     except Exception:

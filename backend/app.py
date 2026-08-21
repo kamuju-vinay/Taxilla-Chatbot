@@ -586,18 +586,40 @@ def serve_frontend(path):
     return send_from_directory(FRONTEND_DIST, "index.html")
 
 
+# Start the background mail-poll scheduler unconditionally, not gated
+# behind `if __name__ == "__main__"` — that guard only ever runs true
+# under `python app.py`, never when the app is imported as a WSGI module
+# by gunicorn (`gunicorn app:app`), which is how it actually runs in
+# production. The scheduler was silently never starting there at all,
+# meaning report emails were only ever picked up by a manual "Check
+# mailbox" click, never automatically. Safe to run at import time here:
+# Render's WEB_CONCURRENCY=1 default means exactly one worker process
+# imports this module, so this runs exactly once.
+_scheduler_holder["instance"] = start_background_scheduler()
+
+# Start the background mail-poll scheduler and run the first mailbox
+# sync, both unconditionally at import time — not gated behind
+# `if __name__ == "__main__"`. That guard only ever runs true under
+# `python app.py`, never when the app is imported as a WSGI module by
+# gunicorn (`gunicorn app:app`), which is how it actually runs in
+# production. Both were silently never running there at all, meaning
+# report emails were only ever picked up by a manual "Check mailbox"
+# click, never automatically. Safe to run at import time here: Render's
+# WEB_CONCURRENCY=1 default means exactly one worker process imports
+# this module, so this runs exactly once.
+_scheduler_holder["instance"] = start_background_scheduler()
+
+
+def _initial_sync():
+    try:
+        run_sync_once()
+    except Exception:
+        log.exception("Initial sync failed — check your provider credentials in Settings")
+
+
+threading.Thread(target=_initial_sync, daemon=True).start()
+
 if __name__ == "__main__":
-    _scheduler_holder["instance"] = start_background_scheduler()
-
-    # Run the first mailbox sync in the background instead of blocking
-    # here. A slow or misconfigured provider (bad credentials, no network
-    # to the OAuth endpoint) must never delay the API server from coming
-    # up — /api/reports etc. should be reachable immediately regardless.
-    def _initial_sync():
-        try:
-            run_sync_once()
-        except Exception:
-            log.exception("Initial sync failed — check your provider credentials in .env")
-
-    threading.Thread(target=_initial_sync, daemon=True).start()
-    app.run(host=config.API_HOST, port=config.API_PORT)
+    # Local dev only (`python app.py`) — production runs via gunicorn,
+    # which binds the port itself using the Start Command instead.
+    app.run(host=config.API_HOST, port=config.API_PORT, debug=False)
