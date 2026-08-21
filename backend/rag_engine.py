@@ -190,12 +190,98 @@ def _scrub_metadata_leakage(answer_text):
     return cleaned
 
 
+# Matches "Label text (12,345.67 unit)" style mentions that the model's
+# own answer text uses when citing per-category figures, e.g.
+# "Purchased Goods and Services (426.95 mtCO2e)". Used to deterministically
+# rebuild the table/chart from what the model already said in prose,
+# rather than trusting its separately-sampled chartData field to agree —
+# in practice the two could diverge or chartData could be degenerate
+# (e.g. one bar, wrong magnitude) even when the prose was fine, and
+# re-asking the identical question could get a differently-formatted
+# answer even at low temperature. Deriving from the model's own cited
+# numbers is deterministic given deterministic prose, and self-consistent
+# by construction — the table/chart can never disagree with the text.
+_LABELED_FIGURE_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Z][A-Za-z0-9][A-Za-z0-9 &/\-]{1,68}?)\s*\(\s*\$?([\d][\d,]*\.?\d*)\s*([A-Za-z%$]{0,10}[A-Za-z0-9²]{0,4})?\s*\)"
+)
+_MD_TABLE_RE = re.compile(r"^\s*\|.+\|\s*$", re.MULTILINE)
+
+
+def _extract_labeled_figures(answer_text):
+    """Returns a list of (label, value_float, unit) tuples parsed from the
+    model's own prose, deduplicated by label (first occurrence wins)."""
+    if not answer_text:
+        return []
+    seen = set()
+    out = []
+    for label, value_str, unit in _LABELED_FIGURE_RE.findall(answer_text):
+        label = label.strip().rstrip(",;:")
+        # Skip junk matches: bare numbers/years mistaken for labels, or
+        # labels that are themselves mostly numeric (date ranges etc.)
+        if len(label) < 3 or re.fullmatch(r"[\d/\-\s]+", label):
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        try:
+            value = float(value_str.replace(",", ""))
+        except ValueError:
+            continue
+        seen.add(key)
+        out.append((label, value, (unit or "").strip()))
+    return out
+
+
+def _build_markdown_table(pairs):
+    unit = next((u for _, _, u in pairs if u), "")
+    value_header = f"Value ({unit})" if unit else "Value"
+    lines = [f"| Category | {value_header} |", "|---|---|"]
+    for label, value, _ in pairs:
+        formatted = f"{value:,.2f}" if value != int(value) else f"{int(value):,}"
+        lines.append(f"| {label} | {formatted} |")
+    return "\n".join(lines)
+
+
+def _enforce_consistent_answer(data):
+    """Guarantees the same underlying facts render the same way every
+    time: if the model cited 2+ labeled figures in its prose, a markdown
+    table covering them is REQUIRED (added if the model omitted it), and
+    chartData is REBUILT from those same cited figures rather than left
+    as whatever the model separately sampled — which is what produced a
+    degenerate single-bar chart with a category count instead of real
+    values on a repeat question. Left untouched for genuinely single-
+    figure answers, greetings, or model-provided multi-series/stacked
+    charts (seriesKeys present) that this simple extraction can't safely
+    reconstruct."""
+    answer = data.get("answer") or ""
+    pairs = _extract_labeled_figures(answer)
+    if len(pairs) < 2:
+        return data
+
+    if not _MD_TABLE_RE.search(answer):
+        data["answer"] = answer.rstrip() + "\n\n" + _build_markdown_table(pairs)
+
+    # Only override chartData for simple single-series charts — a
+    # model-built stacked/multi-series comparison (seriesKeys present)
+    # isn't something this label→single-value extraction can safely
+    # reconstruct, so leave those as the model provided.
+    if not data.get("seriesKeys"):
+        data["chartData"] = [{"name": label, "value": value} for label, value, _ in pairs]
+        if not data.get("chartType"):
+            data["chartType"] = "bar"
+        if not data.get("chartTitle"):
+            data["chartTitle"] = "Data Breakdown"
+
+    return data
+
+
 def _scrub_json_answer(raw_json_text):
     """The model's raw response is expected to be a JSON string with an
     "answer" field (see _SYSTEM_PROMPT_TMPL). Parses it, scrubs just that
-    field, and re-serializes — leaves the string untouched (rather than
-    raising) if it isn't valid JSON, since the caller/frontend already
-    has its own tolerant fallback parsing for that case."""
+    field, enforces consistent table/chart presentation, and re-
+    serializes — leaves the string untouched (rather than raising) if it
+    isn't valid JSON, since the caller/frontend already has its own
+    tolerant fallback parsing for that case."""
     try:
         text = raw_json_text.strip()
         if text.startswith("```"):
@@ -204,6 +290,7 @@ def _scrub_json_answer(raw_json_text):
         data = json.loads(text)
         if isinstance(data, dict) and "answer" in data:
             data["answer"] = _scrub_metadata_leakage(data["answer"])
+            data = _enforce_consistent_answer(data)
             return json.dumps(data)
         return raw_json_text
     except Exception:
@@ -471,7 +558,7 @@ class ReportRAGEngine:
             # from one ask to the next. This is a factual-reporting
             # assistant, not a creative one, so consistency matters more
             # than variety here.
-            response = self.co_client.chat(message=prompt, model=self.cohere_model, temperature=0.1)
+            response = self.co_client.chat(message=prompt, model=self.cohere_model, temperature=0.0)
             return (response.text or "").strip()
         except Exception as e:
             err_str = str(e)
@@ -494,7 +581,7 @@ class ReportRAGEngine:
                 url,
                 params={"key": self.gemini_api_key},
                 headers={"content-type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.1}},
+                json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.0}},
                 timeout=timeout,
             )
             resp.raise_for_status()
@@ -514,7 +601,7 @@ class ReportRAGEngine:
         payload = {
             "model": self.groq_model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
+            "temperature": 0.0,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
